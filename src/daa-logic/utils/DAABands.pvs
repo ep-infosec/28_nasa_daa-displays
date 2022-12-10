@@ -1,0 +1,239 @@
+Units: THEORY BEGIN
+  Units: TYPE = { deg, knot, fpm, ft }
+  to (units: Units, val: real): real =
+    COND
+      units = deg -> val * 180 / PI, % val is in rad
+      units = knot -> val * 1.94384, % val is in m/s
+      units = fpm -> val * 3.2084 * 60, % val is in m/s
+      units = ft -> val * 3.28084, % val is in meters
+      ELSE -> val % val is in internal units, i.e., rad, m/s, meters
+    ENDCOND
+  unitsToString (units: Units): string =
+    COND
+      units = deg -> "deg",
+      units = knot -> "knot",
+      units = fpm -> "fpm",
+      units = ft -> "ft"
+    ENDCOND
+  CONVERSION unitsToString
+END Units
+
+DAABands: THEORY
+ BEGIN
+
+  IMPORTING DAIDALUS@get_kinematic_bands, DAIDALUS@alerting,
+            PVSioChecker@pvsio_checker, structures@Maybe,
+	    Units
+
+  KinematicBand: TYPE = [list[RealBand], list[Region]]
+
+  GCore: Global[Core, defcore]
+
+  GParam: Global[Parameters, defparam]
+
+  load_parameters(param: Parameters): void =
+      set[Parameters]
+          (GParam,
+           param
+             WITH [`left_trk := min(param`left_trk, pi),
+                   `right_trk := min(param`right_trk, pi)])
+       AND set[Core](GCore, update_from_param_all(val(GCore), param))
+
+  dblquote(str: string): string = doublequote + str + doublequote
+
+  dblquote(n: nat): string = doublequote + n + doublequote
+
+  json_bands_aux(bands:
+                   {k: KinematicBand |
+                            length(k`1) = length(k`2)}, units: Units): RECURSIVE
+        string =
+    IF null?(bands`1) THEN ""
+    ELSE LET region = car(bands`2), range = car(bands`1),
+             separator: string = IF cons?(cdr(bands`1)) THEN "," ELSE "" ENDIF
+	  IN
+       "{ " + dblquote("range") + ": ["
+            + to(units, lb(range)) + ", "
+	    + to(units, ub(range)) + "], "
+            + dblquote("units")
+            + ": "
+            + dblquote(units)
+            + ", "
+            + dblquote("alert")
+            + ": "
+            + dblquote(pvs2str(region))
+            + " }"
+	    + separator
+	    + json_bands_aux((cdr(bands`1), cdr(bands`2)), units)
+    ENDIF
+     MEASURE length(bands`1)
+
+  json_bands(time: real, bands: KinematicBand, units: Units): string =
+      "{ " + dblquote("time") + ": " + time + ", " + dblquote("bands") +
+       ": [ "
+       + json_bands_aux(bands, units)
+       + " ]"
+       + "}"
+
+  json_alert_aux(t: Traffic, a: list[nat]): RECURSIVE string =
+    IF null?(a) THEN ""
+    ELSE LET alert = car(a), tfk = car(t) IN
+           "{ " + dblquote("ac") + ": " + dblquote(tfk`id) + ", " +
+            dblquote("alert")
+            + ": "
+            + dblquote(alert)
+            + " }"
+            + IF cons?(cdr(a)) THEN "," ELSE "" ENDIF
+            + json_alert_aux(cdr(t), cdr(a))
+    ENDIF
+     MEASURE length(a)
+
+  json_alerts(time: real, traffic: {t: Traffic | NOT null?(t)},
+              a: list[nat]):
+        string =
+      "{ " + dblquote("time") + ": " + time + ", " + dblquote("alerts") +
+       ": [ "
+       + json_alert_aux(traffic, a)
+       + " ]"
+       + "}"
+
+  SimulationStep: TYPE = [real, traffic: {t: Traffic | NOT null?(t)}]
+
+  Scenario: TYPE = list[SimulationStep]
+
+  BandsInfo: TYPE =
+        [# alerts: string,
+           heading_bands: string,
+           horizontal_bands: string,
+           vertical_bands: string,
+           altitude_bands: string #]
+
+  compute_bands(s: SimulationStep): BandsInfo =
+      LET time: real = s`1,
+          traffic: {t: Traffic | NOT null?(t)} = s`2,
+          par = val(GParam),
+          core: Core = val(GCore),
+          own = car(traffic),
+          acs = cdr(traffic),
+          ttvls = ac_ttv_lists(par`alertor, par`lookahead_time, own, acs),
+          cts = conf_traffic_splits(ttvls),
+          Ucore: UpdatedCore =
+            core
+              WITH [`ownship := own,
+                    `traffic := acs,
+                    `conf_traffic_split := cts,
+                    `outdated := FALSE],
+          alert = alerting(par, Ucore)(acs),
+          trk = get_kinematic_trk(par, Ucore, defCache),
+          gs = get_kinematic_gs(par, Ucore, defCache),
+          vs = get_kinematic_vs(par, Ucore, defCache),
+          alt = get_kinematic_alt(par, Ucore, defCache)
+        IN
+        (# alerts := json_alerts(time, acs, alert),
+           heading_bands := json_bands(time, trk, deg),
+           horizontal_bands := json_bands(time, gs, knot),
+           vertical_bands := json_bands(time, vs, fpm),
+           altitude_bands := json_bands(time, alt, ft) #)
+
+  compute_bands_rec(scenario: Scenario): RECURSIVE list[BandsInfo] =
+    IF null?(scenario) THEN (: :)
+    ELSE cons(compute_bands(car(scenario)),
+              compute_bands_rec(cdr(scenario)))
+    ENDIF
+     MEASURE length(scenario)
+
+  print_alerts(bands: list[BandsInfo]): RECURSIVE bool =
+    IF null?(bands) THEN TRUE
+    ELSE LET out: bool = printf("~a", car(bands)`alerts),
+             out = IF cons?(cdr(bands)) THEN println(", ") ELSE TRUE ENDIF
+           IN print_alerts(cdr(bands))
+    ENDIF
+     MEASURE bands`length
+
+  print_heading_bands(bands: list[BandsInfo]): RECURSIVE bool =
+    IF null?(bands) THEN TRUE
+    ELSE LET out: bool = printf("~a", car(bands)`heading_bands),
+             out = IF cons?(cdr(bands)) THEN println(", ") ELSE TRUE ENDIF
+           IN print_heading_bands(cdr(bands))
+    ENDIF
+     MEASURE bands`length
+
+  print_horizontal_speed_bands(bands: list[BandsInfo]): RECURSIVE bool =
+    IF null?(bands) THEN TRUE
+    ELSE LET out: bool = printf("~a", car(bands)`horizontal_bands),
+             out = IF cons?(cdr(bands)) THEN println(", ") ELSE TRUE ENDIF
+           IN print_horizontal_speed_bands(cdr(bands))
+    ENDIF
+     MEASURE bands`length
+
+  print_vertical_speed_bands(bands: list[BandsInfo]): RECURSIVE bool =
+    IF null?(bands) THEN TRUE
+    ELSE LET out: bool = printf("~a", car(bands)`vertical_bands),
+             out = IF cons?(cdr(bands)) THEN println(", ") ELSE TRUE ENDIF
+           IN print_vertical_speed_bands(cdr(bands))
+    ENDIF
+     MEASURE bands`length
+
+  print_altitude_bands(bands: list[BandsInfo]): RECURSIVE bool =
+    IF null?(bands) THEN TRUE
+    ELSE LET out: bool = printf("~a", car(bands)`altitude_bands),
+             out = IF cons?(cdr(bands)) THEN println(", ") ELSE TRUE ENDIF
+           IN print_altitude_bands(cdr(bands))
+    ENDIF
+     MEASURE bands`length
+
+  Descriptor: TYPE = [# version: string, configuration: string, scenario: string #]
+  print_json_bands(scenario: Scenario, desc: Descriptor): bool =
+      LET bands: list[BandsInfo] = compute_bands_rec(scenario),
+          out: bool = println("{"),
+	  out = println(dblquote("Info") + ": { " + dblquote("version") + ": " + dblquote(desc`version)
+	                + ", " + dblquote("configuration") + ": " + dblquote(desc`configuration) + " }" + ","),
+	  out = println(dblquote("Scenario") + ": " + dblquote(desc`scenario) + ","),
+          out = println(dblquote("Alerts") + " : ["),
+          out = print_alerts(bands),
+          out = println(" ],"),
+          out = println(dblquote("Heading Bands") + " : ["),
+          out = print_heading_bands(bands),
+          out = println(" ],"),
+          out = println(dblquote("Horizontal Speed Bands") + " : ["),
+          out = print_horizontal_speed_bands(bands),
+          out = println(" ],"),
+          out = println(dblquote("Vertical Speed Bands") + " : ["),
+          out = print_vertical_speed_bands(bands),
+          out = println(" ],"),
+          out = println(dblquote("Altitude Bands") + " : ["),
+          out = print_altitude_bands(bands),
+          out = println(" ]"),
+          out = println("}") IN TRUE
+
+
+ END DAABands
+
+
+
+
+test: THEORY
+ BEGIN IMPORTING DAABands
+
+  %-- std config
+  std: Parameters = (# lookahead_time := 180.00000000, left_trk := 3.14159265, right_trk := 3.14159265, min_gs := 5.14444444, max_gs := 360.11111111, min_vs := -30.48000000, max_vs := 30.48000000, min_alt := 30.48000000, max_alt := 15240.00000000, trk_step := 0.01745329, gs_step := 2.57222222, vs_step := 0.50800000, alt_step := 30.48000000, horizontal_accel := 0.00000000, vertical_accel := 0.00000000, turn_rate := 0.00000000, bank_angle := 0.00000000, vertical_rate := 0.00000000, horizontal_nmac :=152.40000000, vertical_nmac :=30.48000000, recovery_stability_time := 0.00000000, min_horizontal_recovery := 1222.32000000, min_vertical_recovery := 137.16000000, conflict_crit := false, recovery_crit := false, recovery_trk := true, recovery_gs := true, recovery_vs := true, recovery_alt := true, ca_bands := false, ca_factor := 0.20000000, contour_thr := 3.14159265, alertor := (2, (: (# wcv:= (# DTHR := 1222.32000000, ZTHR := 213.36000000, TTHR := 35.0, TCOA := 0.0 #), alerting_time:= 55.0, early_alerting_time:= 75.0, region:= NONE, spread_trk:= (0.00000000,0.00000000), spread_gs:= (0.00000000,0.00000000), spread_vs:= (0.00000000,0.00000000), spread_alt:= (0.00000000,0.00000000) #),(# wcv:= (# DTHR := 1222.32000000, ZTHR := 137.16000000, TTHR := 35.0, TCOA := 0.0 #), alerting_time:= 55.0, early_alerting_time:= 75.0, region:= MID, spread_trk:= (0.00000000,0.00000000), spread_gs:= (0.00000000,0.00000000), spread_vs:= (0.00000000,0.00000000), spread_alt:= (0.00000000,0.00000000) #),(# wcv:= (# DTHR := 1222.32000000, ZTHR := 137.16000000, TTHR := 35.0, TCOA := 0.0 #), alerting_time:= 25.0, early_alerting_time:= 55.0, region:= NEAR, spread_trk:= (0.00000000,0.00000000), spread_gs:= (0.00000000,0.00000000), spread_vs:= (0.00000000,0.00000000), spread_alt:= (0.00000000,0.00000000) #) :))#)
+
+  %-- example scenario MultiAircraftSmall
+  mas: Scenario = (:
+(46.0, (: (# id := "AC0", s := (# x:= 0.00000000, y:= 0.00000000, z:= 1217.22630113 #), v := (# x:= -78.44655154, y:= 38.45907995, z:= 0.22600149 #) #), (# id := "AC1", s := (# x:= -18297.89844427, y:= 5676.40015496, z:= 1219.20572536 #), v := (# x:= 98.15876248, y:= -30.83666410, z:= 0.00002396 #) #), (# id := "AC2", s := (# x:= -8425.76524697, y:= 2615.79188839, z:= 1066.80213604 #), v := (# x:= -49.29389096, y:= 27.79228224, z:= 0.00001085 #) #), (# id := "AC3", s := (# x:= -17015.81005354, y:= 2236.52434909, z:= 1828.80261823 #), v := (# x:= 82.07433139, y:= 19.54192809, z:= 0.00000704 #) #) :)),
+(47.0, (: (# id := "AC0", s := (# x:= 0.00000000, y:= 0.00000000, z:= 1217.44175388 #), v := (# x:= -80.64409498, y:= 33.60182030, z:= 0.20603563 #) #), (# id := "AC1", s := (# x:= -18109.95253760, y:= 5605.43610400, z:= 1219.20574822 #), v := (# x:= 98.15926583, y:= -30.83509156, z:= 0.00002213 #) #), (# id := "AC2", s := (# x:= -8393.32928441, y:= 2606.99018584, z:= 1066.80214640 #), v := (# x:= -49.29396802, y:= 27.79214637, z:= 0.00001007 #) #), (# id := "AC3", s := (# x:= -16842.27557287, y:= 2219.71707958, z:= 1828.80262494 #), v := (# x:= 82.07404800, y:= 19.54314129, z:= 0.00000640 #) #) :)),
+(48.0, (: (# id := "AC0", s := (# x:= 0.00000000, y:= 0.00000000, z:= 1217.82389475 #), v := (# x:= -81.97933212, y:= 30.16779610, z:= 0.71231889 #) #), (# id := "AC1", s := (# x:= -17920.15079352, y:= 5539.25036360, z:= 1219.20576956 #), v := (# x:= 98.15977403, y:= -30.83350323, z:= 0.00002044 #) #), (# id := "AC2", s := (# x:= -8358.94070111, y:= 2602.96533575, z:= 1066.80215616 #), v := (# x:= -49.29404974, y:= 27.79200223, z:= 0.00000935 #) #), (# id := "AC3", s := (# x:= -16666.78878927, y:= 2207.68774055, z:= 1828.80263103 #), v := (# x:= 82.07376134, y:= 19.54436833, z:= 0.00000582 #) #) :)),
+(49.0, (: (# id := "AC0", s := (# x:= 0.00000000, y:= 0.00000000, z:= 1218.78614500 #), v := (# x:= -82.30003670, y:= 29.13967969, z:= 1.05104480 #) #), (# id := "AC1", s := (# x:= -17729.66469755, y:= 5474.95568879, z:= 1219.20578907 #), v := (# x:= 98.16028443, y:= -30.83190921, z:= 0.00001887 #) #), (# id := "AC2", s := (# x:= -8323.86884516, y:= 2600.82913905, z:= 1066.80216530 #), v := (# x:= -49.29413309, y:= 27.79185519, z:= 0.00000868 #) #), (# id := "AC3", s := (# x:= -16490.61916859, y:= 2197.54909542, z:= 1828.80263652 #), v := (# x:= 82.07347297, y:= 19.54560011, z:= 0.00000529 #) #) :)),
+(50.0, (: (# id := "AC0", s := (# x:= 0.00000000, y:= 0.00000000, z:= 1219.76136540 #), v := (# x:= -82.52861107, y:= 28.41368315, z:= 0.87014174 #) #), (# id := "AC1", s := (# x:= -17538.88468767, y:= 5411.66374139, z:= 1219.20580705 #), v := (# x:= 98.16079499, y:= -30.83031249, z:= 0.00001743 #) #), (# id := "AC2", s := (# x:= -8288.50433892, y:= 2599.58179885, z:= 1066.80217353 #), v := (# x:= -49.29421669, y:= 27.79170665, z:= 0.00000805 #) #), (# id := "AC3", s := (# x:= -16314.15742067, y:= 2188.30164193, z:= 1828.80264170 #), v := (# x:= 82.07318454, y:= 19.54683411, z:= 0.00000481 #) #) :)),
+(51.0, (: (# id := "AC0", s := (# x:= 0.00000000, y:= 0.00000000, z:= 1220.45662517 #), v := (# x:= -82.74213741, y:= 27.83855526, z:= 0.54878685 #) #), (# id := "AC1", s := (# x:= -17347.90837277, y:= 5348.93020236, z:= 1219.20582381 #), v := (# x:= 98.16130596, y:= -30.82871407, z:= 0.00001609 #) #), (# id := "AC2", s := (# x:= -8252.94466141, y:= 2599.00114687, z:= 1066.80218115 #), v := (# x:= -49.29430120, y:= 27.79155753, z:= 0.00000747 #) #), (# id := "AC3", s := (# x:= -16137.40323612, y:= 2179.72315477, z:= 1828.80264597 #), v := (# x:= 82.07289555, y:= 19.54807019, z:= 0.00000436 #) #) :)),
+(52.0, (: (# id := "AC0", s := (# x:= 0.00000000, y:= 0.00000000, z:= 1220.84146779 #), v := (# x:= -82.94406218, y:= 27.37303997, z:= 0.26212270 #) #), (# id := "AC1", s := (# x:= -17156.73591429, y:= 5286.75508120, z:= 1219.20583936 #), v := (# x:= 98.16181781, y:= -30.82711410, z:= 0.00001486 #) #), (# id := "AC2", s := (# x:= -8217.18997097, y:= 2598.97606487, z:= 1066.80218846 #), v := (# x:= -49.29438618, y:= 27.79140758, z:= 0.00000693 #) #), (# id := "AC3", s := (# x:= -15960.64983689, y:= 2171.70292597, z:= 1828.80265024 #), v := (# x:= 82.07260647, y:= 19.54930632, z:= 0.00000396 #) #) :))
+:)
+
+  %-- example run
+  test: bool =
+    LET ldr: bool = load_parameters(std)
+     IN print_json_bands(mas, (# version := "1.0.1", configuration := "std", scenario := "MultiAircraft.small" #))
+
+
+ END test
+
+

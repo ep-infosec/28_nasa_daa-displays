@@ -1,0 +1,60 @@
+## ChangeLog
+### 1.0.14 (2022.10.26)
+- Improved aural annunciations
+- Improved DANTi app (wedge persistence + compass rotation)
+
+### 1.0.13 (2022.02.02)
+- Added support for VFR maps
+- Added widescreen mode for moving map
+- Added support for DAA aural annunciations
+- Updated map rendering engine (default is now LeafletJS)
+
+### 1.0.12 (2021.11.09)
+- Added display elements for flight plan
+
+### 1.0.11 (2021.06.22)
+- Improved playback player
+- Added wind indicator in DANTi
+- Refactoring
+
+### 1.0.10 (2020.08.02)
+- Added hazard areas in single-view
+
+### 1.0.9 (2020.06.16)
+- Added contours in single-view
+
+### 1.0.8 (2020.04.08)
+- Added 'wedge' resolution in DANTi
+
+### 1.0.7 (2020.04.08)
+- Added wind vector
+
+### 1.0.6 (2020.02.12)
+- Added band monitors
+
+### 1.0.5 (2019.12.18)
+- Added terrain mode
+- Added 2D geofences
+
+### 1.0.4 (2019.11.22)
+- Added support for the execution of PVSio specifications of DAIDALUS
+- Added command line options for the server
+
+### 1.0.3 (2019.11.05)
+- Added support for the execution of C++ implementation of DAIDALUS
+- Added new App: 3d-view
+
+### 1.0.2 (2019.09.10)
+- Improved playback performance and loading time
+- Improved playback controls: plot, reset, goto-time
+- Improved plot controls: point-and-click navigation
+- Improved split-view plots: diff markers & current flight data rendered in plots
+
+### 1.0.1 (2019.08.01)
+- Added new App: Airspace view
+- Added new widgets: ViewOptions (nrthup, traffic, call-sign)
+- Added support for rendering LoS regions
+- Improved interactive map: added support for displaying call sign, north up view, toggle traffic data
+
+### 1.0.0
+- Initial release.
